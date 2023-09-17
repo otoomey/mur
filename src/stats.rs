@@ -2,6 +2,7 @@ use std::fmt::Display;
 
 use tabled::{builder::Builder, settings::Style};
 
+#[derive(Copy, Clone)]
 pub struct Stats {
     pub cycles: usize,
     pub stall_cycles: usize,

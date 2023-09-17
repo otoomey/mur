@@ -8,11 +8,20 @@ if [ ! -e "$TEMPD" ]; then
 fi
 
 function compile () {
-    clang -Wl,-Ttext=0x0 -nostdlib --target=riscv64 -march=rv64g -mno-relax -o "$TEMPD/bin" "$1"
+    if [[ $1 == *.c ]] 
+    then
+        FNAME=$(basename $1 .c)
+        clang -nostdlib --target=riscv64 -nostdlib -march=rv64i -mabi=lp64 -mno-relax -S -o "$TEMPD/asm.s" "$1"
+        clang -Wl,-Ttext=0x0 -nostdlib --target=riscv64 -march=rv64i -mabi=lp64 -mno-relax -o "$TEMPD/bin" "$TEMPD/asm.s"
+    else
+        clang -Wl,-Ttext=0x0 -nostdlib --target=riscv64 -march=rv64i -mabi=lp64 -mno-relax -o "$TEMPD/bin" "$1"
+    fi
     FNAME=$(basename $1 .s)
+    FNAME=$(basename $FNAME .c)
     llvm-objcopy -O binary "$TEMPD/bin" "./out/$FNAME.bin"
 }
 
+mkdir out
 if [[ -d $1 ]]; then
     for entry in "$1"/*
     do

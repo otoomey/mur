@@ -1,29 +1,45 @@
+use std::vec;
+
 use tabled::{builder::Builder, settings::Style};
 
-use crate::stats::Stats;
+use crate::{stats::Stats, mem::{B8, B16, B32, B64}, bus::Bus, exception::Exception, csr::Csr};
 
-pub struct Neumann {
-    pub regfile: [u64; 32],
-    pub pc: u64,
-    pub mem: Mem
+pub struct Exit {
+    pub stats: Stats,
+    pub ex: Exception
 }
 
-pub struct Mem {
-    mem: Vec<u8>,
-    offset: u64
-}
+pub trait SoC {
+    fn execute(&mut self) -> Result<(), Exit>;
+    fn pc(&self) -> u64;
+    fn regfile(&self) -> &[u64; 32];
+    fn bus(&self) -> &Bus;
+    fn bus_mut(&mut self) -> &mut Bus;
+    fn csr(&self) -> &Csr;
+    fn csr_mut(&mut self) -> &mut Csr;
 
-impl Neumann {
-    pub fn new(mem: Vec<u8>, mem_offset: u64) -> Self {
-        Neumann { 
-            regfile: [0; 32], 
-            pc: 0, 
-            mem: Mem::new(mem, mem_offset)
-        }
+    fn dump_registers(&self) {
+        let mut builder = Builder::new();
+        builder.set_header(["Register", "Decimal", "Hex", "Binary"]);
+        self.regfile()
+            .iter()
+            .enumerate()
+            .map(|(i, r)| [
+                format!("x{}", i),
+                format!("{}", r),
+                format!("{:#01x}", r),
+                format!("{:#01b}", r),
+            ]).for_each(|line| {
+                builder.push_record(line);
+            });
+        let table = builder.build()
+            .with(Style::ascii_rounded())
+            .to_string();
+        println!("{}", table);
     }
 }
 
-pub trait Isa {
+pub trait Isa: SoC {
     fn opcode(ins: u32) -> u32 {
         ins & 0x7f
     }
@@ -42,6 +58,10 @@ pub trait Isa {
 
     fn is_jmp(ins: u32) -> bool {
         Self::opcode(ins) == 0b1101111 || Self::opcode(ins) == 0b1100111
+    }
+    
+    fn is_zicsr(ins: u32) -> bool {
+        Self::opcode(ins) == 0b1110011
     }
 
     fn is_alu_op(ins: u32) -> bool {
@@ -97,14 +117,6 @@ pub trait Isa {
         let sign  =  ins & 0b1000000_00000_00000_000_00000_0000000;
         (lower | upper | middl | sign) as i32
     }
-}
-
-pub trait SoC: Isa {
-    fn execute(&mut self) -> Stats;
-    fn pc(&self) -> u64;
-    fn regfile(&self) -> &[u64; 32];
-    fn mem_mut(&mut self) -> &mut Mem;
-    fn mem(&self) -> &Mem;
 
     fn ireg(&self, reg: usize) -> i64 {
         self.regfile()[reg] as i64
@@ -114,7 +126,7 @@ pub trait SoC: Isa {
         self.regfile()[reg]
     }
 
-    fn ld(&self, ins: u32) -> u64 {
+    fn ld(&self, ins: u32) -> Result<u64, Exception> {
         let imm = Self::i_imm(ins) as i64;
         let addr = self.ireg(Self::rs1(ins)).wrapping_add(imm) as u64;
         let funct3 = Self::funct3(ins);
@@ -122,54 +134,54 @@ pub trait SoC: Isa {
             0x0 => {
                 // lb
                 println!("lb");
-                self.mem().ld8(addr) as i8 as i64 as u64
+                Ok(self.bus().load(addr, B8)? as i8 as i64 as u64)
             }
             0x1 => {
                 // lh
                 println!("lh");
-                self.mem().ld16(addr) as i16 as i64 as u64
+                Ok(self.bus().load(addr, B16)? as i16 as i64 as u64)
             }
             0x2 => {
                 // lw
                 println!("lw");
-                self.mem().ld32(addr) as i32 as i64 as u64
+                Ok(self.bus().load(addr, B32)? as i32 as i64 as u64)
             }
             0x3 => {
                 // ld
                 println!("ld");
-                self.mem().ld64(addr)
+                self.bus().load(addr, B64)
             }
             0x4 => {
                 // lbu
                 println!("lbu");
-                self.mem().ld8(addr) as u64
+                self.bus().load(addr, B8)
             }
             0x5 => {
                 // lhu
                 println!("lhu");
-                self.mem().ld16(addr) as u64
+                self.bus().load(addr, B16)
             }
             0x6 => {
                 // lwu
                 println!("lwu");
-                self.mem().ld32(addr) as u64
+                self.bus().load(addr, B32)
             }
-            _ => panic!("Unknown ld op {}", funct3)
+            _ => Err(Exception::IllegalInstruction(ins as u64))
         }
     }
 
-    fn st(&mut self, ins: u32) {
+    fn st(&mut self, ins: u32) -> Result<(), Exception> {
         let imm = Self::s_imm(ins) as i64;
         let addr = self.ireg(Self::rs1(ins)).wrapping_add(imm) as u64;
         let funct3 = Self::funct3(ins);
         let value = self.ureg(Self::rs2(ins));
-        println!("st");
+        println!("st {} {}", addr, value);
         match funct3 {
-            0x0 => self.mem_mut().st8(addr, value as u8),  // sb
-            0x1 => self.mem_mut().st16(addr, value as u16), // sh
-            0x2 => self.mem_mut().st32(addr, value as u32), // sw
-            0x3 => self.mem_mut().st64(addr, value), // sd
-            _ => panic!("Unknown st op {}", funct3)
+            0x0 => self.bus_mut().store(addr, B8, value),  // sb
+            0x1 => self.bus_mut().store(addr, B16, value), // sh
+            0x2 => self.bus_mut().store(addr, B32, value), // sw
+            0x3 => self.bus_mut().store(addr, B64, value), // sd
+            _ => Err(Exception::IllegalInstruction(ins as u64))
         }
     }
 
@@ -181,282 +193,214 @@ pub trait SoC: Isa {
             0b0100011 => vec![Self::rs1(ins), Self::rs2(ins)], // store
             0b0010011 => vec![Self::rs1(ins)], // alu imm
             0b0110011 => vec![Self::rs1(ins), Self::rs2(ins)], // alu
-            _ => panic!("Unknown instruction {}", Self::opcode(ins))
+            _ => vec![]
         }
     }
 
-    fn jmp(&self, ins: u32) -> (u64, u64) {
+    fn jmp(&self, ins: u32) -> Result<(u64, u64), Exception> {
         match Self::opcode(ins) {
             0b1101111 => { // jal
                 println!("jal");
                 let next = ((self.pc() as i64) + Self::j_imm(ins) as i64) & 0xff_ff_ff_fe;
                 let rd = self.pc() + 4;
-                (next as u64, rd)
+                Ok((next as u64, rd))
             }
             0b1100111 => { // jalr
                 println!("jalr");
                 let next = (self.ireg(Self::rs1(ins)) + Self::i_imm(ins) as i64) & 0xff_ff_ff_fe;
                 let rd = self.pc() + 4;
-                (next as u64, rd)
+                Ok((next as u64, rd))
             }
-            _ => panic!("Not a valid jump opcode {}", Self::opcode(ins))
+            _ => Err(Exception::IllegalInstruction(ins as u64))
         }
     }
 
-    fn br(&self, ins: u32) -> Option<u64> {
+    fn br(&self, ins: u32) -> Result<Option<u64>, Exception> {
         match (Self::funct3(ins), Self::opcode(ins)) {
             (0b000, 0b1100011) => { // beq
                 println!("beq");
                 if self.ureg(Self::rs1(ins)) == self.ureg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             (0b001, 0b1100011) => { // bne
                 println!("bne");
                 if self.ureg(Self::rs1(ins)) != self.ureg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             (0b100, 0b1100011) => { // blt
                 println!("blt");
                 if self.ireg(Self::rs1(ins)) < self.ireg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             (0b101, 0b1100011) => { // bge
                 println!("bge");
                 if self.ireg(Self::rs1(ins)) >= self.ireg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             (0b110, 0b1100011) => { // bltu
                 println!("bltu");
                 if self.ureg(Self::rs1(ins)) < self.ureg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
             (0b111, 0b1100011) => { // bgeu
                 println!("bgeu");
                 if self.ureg(Self::rs1(ins)) >= self.ureg(Self::rs2(ins)) {
-                    Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64)
+                    Ok(Some((self.pc() as i64 + Self::b_imm(ins) as i64) as u64))
                 } else {
-                    None
+                    Ok(None)
                 }
             }
-            _ => panic!("Unknown instruction {}", ins)
+            _ => Err(Exception::IllegalInstruction(ins as u64))
         }
     }
 
-    fn alu(&self, ins: u32) -> u64 {
+    fn alu(&self, ins: u32) -> Result<u64, Exception> {
         match (Self::funct7(ins), Self::funct3(ins), Self::opcode(ins)) {
             (_, _, 0b0110111) => { // lui
                 println!("lui");
-                ((Self::u_imm(ins) as i64) << 12) as u64
+                Ok(((Self::u_imm(ins) as i64) << 12) as u64)
             }
             (_, _, 0b0010111) => { // auipc
                 println!("auipc");
                 let val = (Self::u_imm(ins) as i64) << 12;
-                (self.pc() as i64).wrapping_add(val) as u64
+                Ok((self.pc() as i64).wrapping_add(val) as u64)
             }
             (_, 0b000, 0b0010011) => { // addi
-                println!("addi");
-                self.ireg(Self::rs1(ins)).wrapping_add(Self::i_imm(ins) as i64) as u64
+                println!("addi {} {} {}", Self::rs1(ins), self.ireg(Self::rs1(ins)), Self::i_imm(ins) as i64);
+                Ok(self.ireg(Self::rs1(ins)).wrapping_add(Self::i_imm(ins) as i64) as u64)
             },
             (_, 0b010, 0b0010011) => { // slti
                 println!("slti");
                 let cond = self.ireg(Self::rs1(ins)) < (Self::i_imm(ins) as i64);
-                if cond { 1 } else { 0 }
+                Ok(if cond { 1 } else { 0 })
             }
             (_, 0b011, 0b0010011) => { // sltiu
                 println!("sltiu");
                 let cond = self.ureg(Self::rs1(ins)) < (Self::i_imm(ins) as u64);
-                if cond { 1 } else { 0 }
+                Ok(if cond { 1 } else { 0 })
             }
             (_, 0b100, 0b0010011) => { // xori
                 println!("xori");
-                self.ureg(Self::rs1(ins)) ^ (Self::i_imm(ins) as u64)
+                Ok(self.ureg(Self::rs1(ins)) ^ (Self::i_imm(ins) as u64))
             }
             (_, 0b110, 0b0010011) => { // ori
                 println!("ori");
-                self.ureg(Self::rs1(ins)) | (Self::i_imm(ins) as u64)
+                Ok(self.ureg(Self::rs1(ins)) | (Self::i_imm(ins) as u64))
             }
             (_, 0b111, 0b0010011) => { // andi
                 println!("andi");
-                self.ureg(Self::rs1(ins)) & (Self::i_imm(ins) as u64)
+                Ok(self.ureg(Self::rs1(ins)) & (Self::i_imm(ins) as u64))
             }
             (_, 0b001, 0b0010011) => { // slli
                 println!("slli");
-                self.ureg(Self::rs1(ins)) << (Self::i_imm(ins) as u64)
+                Ok(self.ureg(Self::rs1(ins)) << (Self::i_imm(ins) as u64))
             }
             (0b0000000, 0b101, 0b0010011) => { // srli
                 println!("srli");
-                self.ureg(Self::rs1(ins)) >> (Self::i_imm(ins) as u64)
+                Ok(self.ureg(Self::rs1(ins)) >> (Self::i_imm(ins) as u64))
             }
             (0b1000000, 0b101, 0b0010011) => { // srai
                 println!("srai");
                 let shift = ((Self::i_imm(ins) as u32) << 1) >> 1;
-                (self.ireg(Self::rs1(ins)) >> (shift as i64)) as u64
+                Ok((self.ireg(Self::rs1(ins)) >> (shift as i64)) as u64)
             }
             (0b0000000, 0b000, 0b0110011,) => { // add
                 println!("add");
-                self.ireg(Self::rs1(ins)).wrapping_add(self.ireg(Self::rs2(ins))) as u64
+                Ok(self.ireg(Self::rs1(ins)).wrapping_add(self.ireg(Self::rs2(ins))) as u64)
             }
             (0b0100000, 0b000, 0b0110011) => { // sub
                 println!("sub");
-                self.ireg(Self::rs1(ins)).wrapping_sub(self.ireg(Self::rs2(ins))) as u64
+                Ok(self.ireg(Self::rs1(ins)).wrapping_sub(self.ireg(Self::rs2(ins))) as u64)
             }
             (0b0000000, 0b001, 0b0110011 ) => { // sll
                 println!("sll");
                 let shift = self.ureg(Self::rs2(ins)) & 0b1_1111;
-                self.ureg(Self::rs1(ins)) << shift
+                Ok(self.ureg(Self::rs1(ins)) << shift)
             }
             (0b0000000, 0b010, 0b0110011 ) => { // slt
                 println!("slt");
                 let cond = self.ireg(Self::rs1(ins)) < self.ireg(Self::rs2(ins));
-                if cond { 1 } else { 0 }
+                Ok(if cond { 1 } else { 0 })
             }
             (0b0000000, 0b011, 0b0110011 ) => { // sltu
                 println!("sltu");
                 let cond = self.ureg(Self::rs1(ins)) < self.ureg(Self::rs2(ins));
-                if cond { 1 } else { 0 }
+                Ok(if cond { 1 } else { 0 })
             }
             (0b0000000, 0b100, 0b0110011) => { // xori
                 println!("xori");
-                self.ureg(Self::rs1(ins)) ^ self.ureg(Self::rs2(ins))
+                Ok(self.ureg(Self::rs1(ins)) ^ self.ureg(Self::rs2(ins)))
             }
             (0b0000000, 0b101, 0b0110011) => { // srl
                 println!("srl");
                 let shift = self.ureg(Self::rs2(ins)) & 0b1_1111;
-                self.ureg(Self::rs1(ins)) >> shift
+                Ok(self.ureg(Self::rs1(ins)) >> shift)
             }
             (0b0100000, 0b101, 0b0110011) => { // sra
                 println!("sra");
                 let shift = self.ureg(Self::rs2(ins)) & 0b1_1111;
-                (self.ireg(Self::rs1(ins)) >> (shift as i64)) as u64
+                Ok((self.ireg(Self::rs1(ins)) >> (shift as i64)) as u64)
             }
             (0b0000000, 0b110, 0b0110011) => { // or
                 println!("or");
-                self.ureg(Self::rs1(ins)) | self.ureg(Self::rs2(ins))
+                Ok(self.ureg(Self::rs1(ins)) | self.ureg(Self::rs2(ins)))
             }
             (0b0000000, 0b111, 0b0110011) => { // and
                 println!("and");
-                self.ureg(Self::rs1(ins)) & self.ureg(Self::rs2(ins))
+                Ok(self.ureg(Self::rs1(ins)) & self.ureg(Self::rs2(ins)))
             }
-            _ => panic!("Unknown instruction {:#032b}", ins)
+            _ => Err(Exception::IllegalInstruction(ins as u64))
         }
     }
 
-    fn dump_registers(&self) {
-        let mut builder = Builder::new();
-        builder.set_header(["Register", "Decimal", "Hex", "Binary"]);
-        self.regfile()
-            .iter()
-            .enumerate()
-            .map(|(i, r)| [
-                format!("x{}", i),
-                format!("{}", r),
-                format!("{:#01x}", r),
-                format!("{:#01b}", r),
-            ]).for_each(|line| {
-                builder.push_record(line);
-            });
-        let table = builder.build()
-            .with(Style::ascii_rounded())
-            .to_string();
-        println!("Cv32e40p [pc: {}] Register File:", self.pc());
-        println!("{}", table);
+    fn zicsr(&self, ins: u32) -> Result<(usize, u64, u64), Exception> {
+        let funct3 = Self::funct3(ins);
+        let csr = Self::i_imm(ins) as u32 as usize;
+        let t = self.csr().load(csr);
+        Ok((
+            csr, // csr in question
+            t, // rd
+            match funct3 { // new csr value
+            0b011 => { // csrrc
+                Ok(t & !(self.ureg(Self::rs1(ins))))
+            },
+            0b111 => { // csrci
+                Ok(t & !(Self::rs1(ins) as u64))
+            }
+            0b010 => { // csrrs
+                Ok(t | self.ureg(Self::rs1(ins)))
+            }
+            0b110 => { // csrri
+                Ok(t | (Self::rs1(ins) as u64))
+            },
+            0b001 => { // csrrw
+                Ok(self.ureg(Self::rs1(ins)))
+            },
+            0b101 => { // csrwi
+                Ok(Self::rs1(ins) as u64)
+            }
+            _ => Err(Exception::IllegalInstruction(ins as u64))
+        }?))
     }
 }
 
-impl Mem {
-    pub fn new(mem: Vec<u8>, offset: u64) -> Self {
-        Self { mem, offset }
-    }
-
-    pub fn if32(&self, pc: u64) -> u32 {
-        let index = pc as usize;
-        if index + 3 >= self.mem.len() {
-            return 0b0000000_00000_00000_000_00000_0010011;
-        }
-        (self.mem[index] as u32)
-            | ((self.mem[index + 1] as u32) << 8)
-            | ((self.mem[index + 2] as u32) << 16)
-            | ((self.mem[index + 3] as u32) << 24)
-    }
-
-    pub fn ld8(&self, addr: u64) -> u8 {
-        let index = (addr - self.offset) as usize;
-        self.mem[index]
-    }
-
-    pub fn ld16(&self, addr: u64) -> u16 {
-        let index = (addr - self.offset) as usize;
-        return (self.mem[index] as u16)
-            | ((self.mem[index + 1] as u16) << 8);
-    }
-
-    pub fn ld32(&self, addr: u64) -> u32 {
-        let index = (addr - self.offset) as usize;
-        return (self.mem[index] as u32)
-            | ((self.mem[index + 1] as u32) << 8)
-            | ((self.mem[index + 2] as u32) << 16)
-            | ((self.mem[index + 3] as u32) << 24);
-    }
-
-    pub fn ld64(&self, addr: u64) -> u64 {
-        let index = (addr - self.offset) as usize;
-        return (self.mem[index] as u64)
-            | ((self.mem[index + 1] as u64) << 8)
-            | ((self.mem[index + 2] as u64) << 16)
-            | ((self.mem[index + 3] as u64) << 24)
-            | ((self.mem[index + 4] as u64) << 32)
-            | ((self.mem[index + 5] as u64) << 40)
-            | ((self.mem[index + 6] as u64) << 48)
-            | ((self.mem[index + 7] as u64) << 56);
-    }
-
-    pub fn st8(&mut self, addr: u64, value: u8) {
-        let index = (addr - self.offset) as usize;
-        self.mem[index] = value;
-    }
-
-    pub fn st16(&mut self, addr: u64, value: u16) {
-        let index = (addr - self.offset) as usize;
-        self.mem[index] = (value & 0xff) as u8;
-        self.mem[index + 1] = ((value >> 8) & 0xff) as u8;
-    }
-
-    pub fn st32(&mut self, addr: u64, value: u32) {
-        let index = (addr - self.offset) as usize;
-        self.mem[index] = (value & 0xff) as u8;
-        self.mem[index + 1] = ((value >> 8) & 0xff) as u8;
-        self.mem[index + 2] = ((value >> 16) & 0xff) as u8;
-        self.mem[index + 3] = ((value >> 24) & 0xff) as u8;
-    }
-
-    pub fn st64(&mut self, addr: u64, value: u64) {
-        let index = (addr - self.offset) as usize;
-        self.mem[index] = (value & 0xff) as u8;
-        self.mem[index + 1] = ((value >> 8) & 0xff) as u8;
-        self.mem[index + 2] = ((value >> 16) & 0xff) as u8;
-        self.mem[index + 3] = ((value >> 24) & 0xff) as u8;
-        self.mem[index + 4] = ((value >> 32) & 0xff) as u8;
-        self.mem[index + 5] = ((value >> 40) & 0xff) as u8;
-        self.mem[index + 6] = ((value >> 48) & 0xff) as u8;
-        self.mem[index + 7] = ((value >> 56) & 0xff) as u8;
-    }
-
-    pub fn size(&self) -> usize {
-        self.mem.len()
+impl Exit {
+    pub fn from_ex(stats: Stats, ex: Exception) -> Self {
+        Self { stats, ex }
     }
 }
