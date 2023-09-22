@@ -6,12 +6,17 @@
 	.p2align	2
 	.type	main,@function
 main:
-	addi	sp, sp, -16
-	sd	ra, 8(sp)
+	addi	sp, sp, -32
+	sd	ra, 24(sp)
+	sd	s0, 16(sp)
+	addi	s0, sp, 32
+	li	a0, 0
+	sw	a0, -20(s0)
 	li	a0, 10
 	call	fib
-	ld	ra, 8(sp)
-	addi	sp, sp, 16
+	ld	ra, 24(sp)
+	ld	s0, 16(sp)
+	addi	sp, sp, 32
 	ret
 .Lfunc_end0:
 	.size	main, .Lfunc_end0-main
@@ -23,21 +28,38 @@ fib:
 	addi	sp, sp, -32
 	sd	ra, 24(sp)
 	sd	s0, 16(sp)
-	sd	s1, 8(sp)
-	li	a1, 2
-	mv	s0, a0
-	bltu	a0, a1, .LBB1_2
-	addiw	a0, s0, -1
-	call	fib
-	mv	s1, a0
-	addiw	a0, s0, -2
-	call	fib
-	addw	s0, a0, s1
+	addi	s0, sp, 32
+	sw	a0, -24(s0)
+	lw	a0, -24(s0)
+	li	a1, 0
+	beq	a0, a1, .LBB1_2
+	j	.LBB1_1
+.LBB1_1:
+	lw	a0, -24(s0)
+	li	a1, 1
+	bne	a0, a1, .LBB1_3
+	j	.LBB1_2
 .LBB1_2:
-	mv	a0, s0
+	lw	a0, -24(s0)
+	sw	a0, -20(s0)
+	j	.LBB1_4
+.LBB1_3:
+	lw	a0, -24(s0)
+	addiw	a0, a0, -1
+	call	fib
+	sd	a0, -32(s0)
+	lw	a0, -24(s0)
+	addiw	a0, a0, -2
+	call	fib
+	mv	a1, a0
+	ld	a0, -32(s0)
+	addw	a0, a0, a1
+	sw	a0, -20(s0)
+	j	.LBB1_4
+.LBB1_4:
+	lw	a0, -20(s0)
 	ld	ra, 24(sp)
 	ld	s0, 16(sp)
-	ld	s1, 8(sp)
 	addi	sp, sp, 32
 	ret
 .Lfunc_end1:
@@ -46,3 +68,4 @@ fib:
 	.ident	"Ubuntu clang version 14.0.0-1ubuntu1.1"
 	.section	".note.GNU-stack","",@progbits
 	.addrsig
+	.addrsig_sym fib

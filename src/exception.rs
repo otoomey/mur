@@ -17,6 +17,7 @@ pub enum Exception {
     StoreAMOPageFault(u64),
 }
 
+#[allow(dead_code)]
 impl Exception {
     pub fn value(&self) -> &u64 {
         match self {
